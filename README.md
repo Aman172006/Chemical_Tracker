@@ -11,6 +11,25 @@ Traditional GPS tracking is insufficient for regulated chemicals, as bad actors 
 
 ---
 
+## 🛠️ Tech Stack & Hardware
+
+### Software & Cloud
+- **Frontend:** React.js, Vite, TailwindCSS, Framer Motion, GSAP, React Leaflet
+- **Backend:** Node.js, Express.js, Socket.io (for real-time WebSockets)
+- **Database & Auth:** Firebase Realtime Database (RTDB) for high-frequency telemetry, Firebase Firestore for structured data, Firebase Authentication
+- **External APIs:** OSRM (Open Source Routing Machine) for geofencing boundaries, Nominatim for reverse geocoding
+
+### Edge Hardware (IoT)
+- **Microcontroller:** ESP32 / ESP32-WROOM (Dual-Core MCU with WiFi/Bluetooth)
+- **Cellular / Connectivity:** SIM800L GSM/GPRS Module for remote cellular telemetry
+- **Positioning:** NEO-6M / ATGM336H GPS Module
+- **Sensors:** 
+  - Load Cells with HX711 Amplifiers (for weight anomaly/skimming detection)
+  - DHT11 / DHT22 Sensors (for internal payload temperature/humidity)
+  - Magnetic Contact Switches / Accelerometers (for physical tamper detection)
+
+---
+
 ## 🏗️ System Architecture
 
 The ChemTrack ecosystem operates via three primary layers:
