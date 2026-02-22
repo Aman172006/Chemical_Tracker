@@ -1,6 +1,6 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Shield } from 'lucide-react';
+import { Shield, Terminal } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
 import HeroSection from '../components/HeroSection';
@@ -10,9 +10,11 @@ import { HardwareSpecsSection } from '../components/landing/HardwareSpecsSection
 import { InteractiveDashboardSection } from '../components/landing/InteractiveDashboardSection';
 import { EnterpriseComplianceSection } from '../components/landing/EnterpriseComplianceSection';
 import { CTASection } from '../components/landing/CTASection';
+import { LogsModal } from '../components/landing/LogsModal';
 
 export function LandingPage() {
     const { isAuthenticated } = useAuth();
+    const [isLogsOpen, setIsLogsOpen] = useState(false);
 
     return (
         <div className="min-h-screen bg-off-white flex flex-col">
@@ -25,6 +27,15 @@ export function LandingPage() {
                     <span className="text-sm font-bold text-badge tracking-wider uppercase">CHEMTRACK</span>
                 </div>
                 <div className="flex items-center gap-3">
+                    {/* Logs Button */}
+                    <button
+                        onClick={() => setIsLogsOpen(true)}
+                        className="hidden sm:flex px-4 py-2 text-xs font-bold text-slate-500 hover:text-olive-600 bg-slate-100 hover:bg-olive-50 rounded-lg transition-colors items-center gap-2"
+                    >
+                        <Terminal className="w-4 h-4" />
+                        SYSTEM LOGS
+                    </button>
+
                     {isAuthenticated ? (
                         <Link
                             to="/dashboard"
@@ -68,6 +79,9 @@ export function LandingPage() {
                     CHEMTRACK © {new Date().getFullYear()} — Secure Chemical Transport Protocol
                 </p>
             </footer>
+
+            {/* Logs Overlay */}
+            <LogsModal isOpen={isLogsOpen} onClose={() => setIsLogsOpen(false)} />
         </div>
     );
 }
