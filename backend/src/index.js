@@ -3,43 +3,32 @@ console.log("🟢 INDEX.JS LOADED\n");
 const http = require("http");
 require("dotenv").config();
 
-// ============================================
-// CHECK .env FILE EXISTS
-// ============================================
-if (!process.env.PORT) {
-  console.log("⚠️  WARNING: .env file might not be loaded");
-  console.log("   Using default PORT 5000\n");
-}
-
-console.log("📋 Environment Check:");
-console.log("   PORT:", process.env.PORT || "5000 (default)");
-console.log("   NODE_ENV:", process.env.NODE_ENV || "not set");
-console.log("   FIREBASE_PROJECT_ID:", process.env.FIREBASE_PROJECT_ID || "❌ NOT SET");
-console.log("   FIREBASE_DATABASE_URL:", process.env.FIREBASE_DATABASE_URL || "❌ NOT SET");
-console.log("");
-
-// ============================================
-// IMPORT CONFIGURATIONS
-// ============================================
+// Import configurations
 let configureServer;
 let firebaseModule;
+let socketModule;
 
 try {
-  console.log("📦 Loading server config...");
   configureServer = require("./config/server");
-  console.log("✅ Server config loaded\n");
+  console.log("✅ Server config loaded");
 } catch (error) {
   console.error("❌ Failed to load server config:", error.message);
   process.exit(1);
 }
 
 try {
-  console.log("📦 Loading Firebase config...");
   firebaseModule = require("./config/firebase");
-  console.log("✅ Firebase config loaded\n");
+  console.log("✅ Firebase config loaded");
 } catch (error) {
   console.error("❌ Failed to load Firebase config:", error.message);
-  console.error("   Full error:", error);
+  process.exit(1);
+}
+
+try {
+  socketModule = require("./websocket/socketHandler");
+  console.log("✅ Socket handler loaded");
+} catch (error) {
+  console.error("❌ Failed to load Socket handler:", error.message);
   process.exit(1);
 }
 
@@ -48,7 +37,7 @@ try {
 // ============================================
 const startServer = async () => {
   try {
-    console.log("==============================================");
+    console.log("\n==============================================");
     console.log("  CHEMICAL TRACKER BACKEND - Starting Up...");
     console.log("==============================================\n");
 
@@ -58,7 +47,6 @@ const startServer = async () => {
 
     if (!firebaseConnected) {
       console.error("\n❌ Cannot start server without Firebase connection.");
-      console.error("   Please check your serviceAccountKey.json and .env file.\n");
       process.exit(1);
     }
 
@@ -67,22 +55,36 @@ const startServer = async () => {
     // Step 2: Configure Express App
     const app = configureServer();
 
-    // Step 3: Create HTTP Server (needed for Socket.io later)
+    // Step 3: Create HTTP Server
     const server = http.createServer(app);
 
-    // Step 4: Start Listening
+    // Step 4: Initialize Socket.io (ATTACH TO SAME SERVER)
+    console.log("📡 Initializing Socket.io...\n");
+    const io = socketModule.initializeSocket(server);
+
+    // Make io accessible in routes via app
+    app.set("io", io);
+
+    // Step 4.5: Start RTDB Telemetry Listener (bridges ESP32 direct writes)
+    console.log("📡 Starting RTDB telemetry listener...\n");
+    const { startTelemetryListener } = require("./services/rtdbListener");
+    startTelemetryListener();
+
+    // Step 5: Start Listening
     const PORT = process.env.PORT || 5000;
 
     server.listen(PORT, () => {
-      console.log("==============================================");
+      console.log("\n==============================================");
       console.log(`  ✅ Server running on port ${PORT}`);
-      console.log(`  📍 Local:   http://localhost:${PORT}`);
-      console.log(`  📍 API:     http://localhost:${PORT}/api/health`);
-      console.log(`  🔥 Mode:    ${process.env.NODE_ENV || "development"}`);
+      console.log(`  📍 HTTP API:    http://localhost:${PORT}`);
+      console.log(`  📍 Health:      http://localhost:${PORT}/api/health`);
+      console.log(`  📍 Routes:      http://localhost:${PORT}/api/routes`);
+      console.log(`  📡 WebSocket:   ws://localhost:${PORT}`);
+      console.log(`  🔥 Mode:        ${process.env.NODE_ENV || "development"}`);
       console.log("==============================================\n");
     });
 
-    // Step 5: Handle Errors
+    // Error Handling
     server.on("error", (error) => {
       if (error.code === "EADDRINUSE") {
         console.error(`❌ Port ${PORT} is already in use.`);
@@ -93,27 +95,30 @@ const startServer = async () => {
     });
 
     // Graceful Shutdown
-    process.on("SIGTERM", () => {
+    const shutdown = () => {
       console.log("\n🛑 Shutting down...");
-      server.close(() => process.exit(0));
-    });
+      io.close(() => {
+        console.log("✅ Socket.io closed");
+        server.close(() => {
+          console.log("✅ HTTP server closed");
+          process.exit(0);
+        });
+      });
+    };
 
-    process.on("SIGINT", () => {
-      console.log("\n🛑 Shutting down...");
-      server.close(() => process.exit(0));
-    });
+    process.on("SIGTERM", shutdown);
+    process.on("SIGINT", shutdown);
 
   } catch (error) {
     console.error("❌ SERVER STARTUP FAILED:", error.message);
-    console.error("   Full error:", error);
+    console.error(error);
     process.exit(1);
   }
 };
 
-// Handle unhandled rejections
+// Handle unhandled errors
 process.on("unhandledRejection", (reason) => {
   console.error("❌ Unhandled Rejection:", reason);
-  process.exit(1);
 });
 
 process.on("uncaughtException", (error) => {
@@ -122,5 +127,5 @@ process.on("uncaughtException", (error) => {
 });
 
 // START
-console.log("🚀 Calling startServer()...\n");
+console.log("🚀 Starting server...\n");
 startServer();

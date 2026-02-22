@@ -1,15 +1,14 @@
-const jwt = require("jsonwebtoken");
-const { db } = require("../config/firebase");
+const { admin, db } = require("../config/firebase");
 const CONSTANTS = require("../config/constants");
 const logger = require("../utils/logger");
-require("dotenv").config();
 
 // ============================================
-// VERIFY JWT TOKEN MIDDLEWARE
+// VERIFY FIREBASE ID TOKEN MIDDLEWARE
+// Uses Firebase Admin SDK to verify tokens
+// issued by Firebase Authentication
 // ============================================
 const verifyToken = async (req, res, next) => {
   try {
-    // Get token from header
     const authHeader = req.headers.authorization;
 
     if (!authHeader) {
@@ -19,7 +18,6 @@ const verifyToken = async (req, res, next) => {
       });
     }
 
-    // Token format: "Bearer <token>"
     if (!authHeader.startsWith("Bearer ")) {
       return res.status(401).json({
         status: "error",
@@ -27,44 +25,48 @@ const verifyToken = async (req, res, next) => {
       });
     }
 
-    const token = authHeader.split(" ")[1];
+    const idToken = authHeader.split(" ")[1];
 
-    // Verify token
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    // Verify Firebase ID token
+    const decodedToken = await admin.auth().verifyIdToken(idToken);
+    const uid = decodedToken.uid;
 
-    // Get user from database to make sure they still exist
+    // Get user profile from Firestore (uses Firebase UID as doc ID)
     const userDoc = await db
       .collection(CONSTANTS.COLLECTIONS.USERS)
-      .doc(decoded.userId)
+      .doc(uid)
       .get();
 
     if (!userDoc.exists) {
       return res.status(401).json({
         status: "error",
-        message: "User no longer exists.",
+        message: "User profile not found. Please complete registration.",
       });
     }
 
-    // Attach user data to request object
+    const userData = userDoc.data();
+
+    // Attach user data to request
     req.user = {
-      userId: decoded.userId,
-      email: decoded.email,
-      role: decoded.role,
-      ...userDoc.data(),
+      userId: uid,
+      email: decodedToken.email || userData.email,
+      phone: decodedToken.phone_number || userData.phone,
+      role: userData.role || CONSTANTS.ROLES.RECEIVER,
+      name: userData.name,
+      ...userData,
     };
 
-    logger.debug(`Authenticated user: ${decoded.email} (${decoded.role})`);
-
+    logger.debug(`Authenticated: ${req.user.email} (${req.user.role})`);
     next();
   } catch (error) {
-    if (error.name === "TokenExpiredError") {
+    if (error.code === "auth/id-token-expired") {
       return res.status(401).json({
         status: "error",
         message: "Token expired. Please login again.",
       });
     }
 
-    if (error.name === "JsonWebTokenError") {
+    if (error.code === "auth/argument-error" || error.code === "auth/id-token-revoked") {
       return res.status(401).json({
         status: "error",
         message: "Invalid token.",
@@ -72,7 +74,7 @@ const verifyToken = async (req, res, next) => {
     }
 
     logger.error("Auth middleware error:", error.message);
-    return res.status(500).json({
+    return res.status(401).json({
       status: "error",
       message: "Authentication failed.",
     });
@@ -82,8 +84,6 @@ const verifyToken = async (req, res, next) => {
 // ============================================
 // ROLE-BASED ACCESS MIDDLEWARE
 // ============================================
-
-// Allow only specific roles
 const requireRole = (...allowedRoles) => {
   return (req, res, next) => {
     if (!req.user) {
@@ -95,7 +95,7 @@ const requireRole = (...allowedRoles) => {
 
     if (!allowedRoles.includes(req.user.role)) {
       logger.warn(
-        `Access denied for user ${req.user.email}. Role: ${req.user.role}, Required: ${allowedRoles.join(", ")}`
+        `Access denied for ${req.user.email}. Role: ${req.user.role}, Required: ${allowedRoles.join(", ")}`
       );
       return res.status(403).json({
         status: "error",
@@ -107,7 +107,6 @@ const requireRole = (...allowedRoles) => {
   };
 };
 
-// Shortcut middlewares for common role checks
 const ownerOnly = requireRole(CONSTANTS.ROLES.OWNER);
 const adminOnly = requireRole(CONSTANTS.ROLES.ADMIN);
 const ownerOrAdmin = requireRole(CONSTANTS.ROLES.OWNER, CONSTANTS.ROLES.ADMIN);

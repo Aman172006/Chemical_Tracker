@@ -16,6 +16,7 @@ const createTrip = async (req, res) => {
       startLocation,
       endLocation,
       plannedRoute,
+      checkpoints,
       chemicalName,
       chemicalQuantity,
       receiverEmail,
@@ -105,6 +106,16 @@ const createTrip = async (req, res) => {
       // Stats
       totalAlerts: 0,
       distanceCovered: 0,
+
+      // Checkpoints
+      checkpoints: Array.isArray(checkpoints) ? checkpoints : [],
+      checkpointsCrossed: [],
+      checkpointsPending: Array.isArray(checkpoints) ? checkpoints.map(c => c.order) : [],
+
+      // Security — permanent flags
+      compromised: false,
+      deviationHistory: [],
+      rerouteHistory: [],
     };
 
     // --- SAVE TO FIRESTORE ---
@@ -188,11 +199,10 @@ const getAllTrips = async (req, res) => {
         .collection(CONSTANTS.COLLECTIONS.TRIPS)
         .orderBy("createdAt", "desc");
     } else {
-      // Owner sees only their trips
+      // Owner sees only their trips (no orderBy to avoid composite index requirement)
       query = db
         .collection(CONSTANTS.COLLECTIONS.TRIPS)
-        .where("ownerId", "==", req.user.userId)
-        .orderBy("createdAt", "desc");
+        .where("ownerId", "==", req.user.userId);
     }
 
     const snapshot = await query.get();
@@ -200,6 +210,13 @@ const getAllTrips = async (req, res) => {
     const trips = [];
     snapshot.forEach((doc) => {
       trips.push(doc.data());
+    });
+
+    // Sort by createdAt descending (client-side for owner queries)
+    trips.sort((a, b) => {
+      const aTime = a.createdAt?._seconds || 0;
+      const bTime = b.createdAt?._seconds || 0;
+      return bTime - aTime;
     });
 
     return res.status(200).json({
@@ -703,6 +720,108 @@ const getTripLiveData = async (req, res) => {
   }
 };
 
+// ============================================
+// REROUTE TRIP (Owner sets new path)
+// PUT /api/trip/:tripId/reroute
+// Role: Owner only
+// ============================================
+const rerouteTrip = async (req, res) => {
+  try {
+    const { tripId } = req.params;
+    const { newRoute, newCheckpoints, reason } = req.body;
+
+    if (!newRoute || newRoute.length < 2) {
+      return res.status(400).json({
+        status: "error",
+        message: "New route must have at least 2 points",
+      });
+    }
+
+    // Get trip
+    const tripDoc = await db
+      .collection(CONSTANTS.COLLECTIONS.TRIPS)
+      .doc(tripId)
+      .get();
+
+    if (!tripDoc.exists) {
+      return res.status(404).json({
+        status: "error",
+        message: "Trip not found",
+      });
+    }
+
+    const tripData = tripDoc.data();
+
+    // Only active trips can be rerouted
+    if (tripData.status !== CONSTANTS.TRIP_STATUS.ACTIVE) {
+      return res.status(400).json({
+        status: "error",
+        message: "Only active trips can be rerouted",
+      });
+    }
+
+    // Store old route in reroute history (permanent audit log)
+    const rerouteEntry = {
+      timestamp: new Date().toISOString(),
+      reason: reason || "Road blocked",
+      previousRoute: tripData.plannedRoute,
+      previousCheckpoints: tripData.checkpoints || [],
+      newRoute: newRoute,
+      newCheckpoints: newCheckpoints || [],
+      reroutedBy: req.user.userId,
+    };
+
+    // Update trip
+    const updates = {
+      plannedRoute: newRoute,
+      endLocation: {
+        lat: newRoute[newRoute.length - 1].lat,
+        lng: newRoute[newRoute.length - 1].lng,
+        address: req.body.newEndAddress || tripData.endLocation.address,
+      },
+      checkpoints: newCheckpoints || [],
+      checkpointsCrossed: [],
+      checkpointsPending: newCheckpoints ? newCheckpoints.map(c => c.order) : [],
+      totalDistance: totalRouteDistance(newRoute),
+      rerouteHistory: admin.firestore.FieldValue.arrayUnion(rerouteEntry),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+
+    await db
+      .collection(CONSTANTS.COLLECTIONS.TRIPS)
+      .doc(tripId)
+      .update(updates);
+
+    // Broadcast via Socket.io
+    const socketHandler = require("../websocket/socketHandler");
+    socketHandler.broadcastTripStatusChange(tripId, {
+      type: "rerouted",
+      tripId,
+      newRoute,
+      newCheckpoints: newCheckpoints || [],
+      reason: reason || "Road blocked",
+    });
+
+    logger.success(`Trip ${tripId} rerouted by ${req.user.email}`);
+
+    return res.status(200).json({
+      status: "success",
+      message: "Trip rerouted successfully",
+      data: {
+        tripId,
+        newRoute,
+        newCheckpoints: newCheckpoints || [],
+      },
+    });
+  } catch (error) {
+    logger.error("Reroute trip error:", error.message);
+    return res.status(500).json({
+      status: "error",
+      message: "Failed to reroute trip",
+    });
+  }
+};
+
 module.exports = {
   createTrip,
   getAllTrips,
@@ -713,4 +832,5 @@ module.exports = {
   getSecretIds,
   validateSecretIdRoute,
   getTripLiveData,
+  rerouteTrip,
 };

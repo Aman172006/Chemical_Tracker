@@ -180,13 +180,15 @@ const getTripSecretIds = async (tripId) => {
     const snapshot = await db
       .collection(CONSTANTS.COLLECTIONS.SECRET_ID_LOG)
       .where("tripId", "==", tripId)
-      .orderBy("generatedAtMs", "desc")
       .get();
 
     const ids = [];
     snapshot.forEach((doc) => {
       ids.push({ logId: doc.id, ...doc.data() });
     });
+
+    // Sort by generatedAtMs descending (in-memory to avoid composite index)
+    ids.sort((a, b) => (b.generatedAtMs || 0) - (a.generatedAtMs || 0));
 
     return ids;
   } catch (error) {

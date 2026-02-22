@@ -1,271 +1,248 @@
-const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
-const { v4: uuidv4 } = require("uuid");
 const { db, admin } = require("../config/firebase");
 const CONSTANTS = require("../config/constants");
 const logger = require("../utils/logger");
-require("dotenv").config();
 
 // ============================================
-// HELPER: Generate JWT Token
-// ============================================
-const generateToken = (userId, email, role) => {
-  return jwt.sign(
-    {
-      userId: userId,
-      email: email,
-      role: role,
-    },
-    process.env.JWT_SECRET,
-    {
-      expiresIn: process.env.JWT_EXPIRES_IN || "7d",
-    }
-  );
-};
-
-// ============================================
-// REGISTER NEW USER
+// SYNC / CREATE USER PROFILE
 // POST /api/auth/register
+// Called after Firebase Auth sign-up on frontend
+// Body: { name, phone, role }
+// Header: Authorization: Bearer <Firebase ID Token>
 // ============================================
 const register = async (req, res) => {
   try {
-    const { email, password, name, phone, role } = req.body;
-
-    // --- VALIDATION ---
-    if (!email || !password || !name || !phone) {
-      return res.status(400).json({
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({
         status: "error",
-        message: "All fields required: email, password, name, phone",
+        message: "Firebase ID token required.",
       });
     }
 
-    if (password.length < 6) {
+    const idToken = authHeader.split(" ")[1];
+    const decodedToken = await admin.auth().verifyIdToken(idToken);
+    const uid = decodedToken.uid;
+    const firebaseEmail = decodedToken.email || null;
+    const firebasePhone = decodedToken.phone_number || null;
+
+    const { name, phone, role } = req.body;
+
+    // Validate
+    if (!name || name.trim().length < 2) {
       return res.status(400).json({
         status: "error",
-        message: "Password must be at least 6 characters",
+        message: "Name is required (min 2 characters).",
       });
     }
 
-    // Validate role
-    const validRoles = [
-      CONSTANTS.ROLES.OWNER,
-      CONSTANTS.ROLES.RECEIVER,
-      CONSTANTS.ROLES.ADMIN,
-    ];
-    const userRole = role && validRoles.includes(role) ? role : CONSTANTS.ROLES.RECEIVER;
+    const userRole = [CONSTANTS.ROLES.OWNER, CONSTANTS.ROLES.RECEIVER].includes(role)
+      ? role
+      : CONSTANTS.ROLES.OWNER;
 
-    // --- CHECK IF EMAIL ALREADY EXISTS ---
-    const existingUser = await db
+    // Check if user already exists
+    const existingDoc = await db
       .collection(CONSTANTS.COLLECTIONS.USERS)
-      .where("email", "==", email.toLowerCase().trim())
+      .doc(uid)
       .get();
 
-    if (!existingUser.empty) {
-      return res.status(400).json({
-        status: "error",
-        message: "Email already registered",
+    if (existingDoc.exists) {
+      // User already registered — return existing profile
+      const userData = existingDoc.data();
+      return res.status(200).json({
+        status: "success",
+        message: "User already registered",
+        data: {
+          user: {
+            userId: uid,
+            ...userData,
+          },
+        },
       });
     }
 
-    // --- HASH PASSWORD ---
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(password, salt);
-
-    // --- CREATE USER DOCUMENT ---
-    const userId = uuidv4();
-
+    // Create user profile in Firestore
     const userData = {
-      userId: userId,
-      email: email.toLowerCase().trim(),
-      password: hashedPassword,
+      userId: uid,
+      email: firebaseEmail,
+      phone: phone || firebasePhone || null,
       name: name.trim(),
-      phone: phone.trim(),
       role: userRole,
-      containers: [],
+      authProvider: firebaseEmail ? "email" : "phone",
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      lastLogin: admin.firestore.FieldValue.serverTimestamp(),
     };
 
-    // Save to Firestore
-    await db
-      .collection(CONSTANTS.COLLECTIONS.USERS)
-      .doc(userId)
-      .set(userData);
+    await db.collection(CONSTANTS.COLLECTIONS.USERS).doc(uid).set(userData);
 
-    // --- GENERATE TOKEN ---
-    const token = generateToken(userId, userData.email, userData.role);
+    // Set custom claims for role-based access
+    await admin.auth().setCustomUserClaims(uid, { role: userRole });
 
-    // --- RESPONSE (don't send password back) ---
-    const { password: _, ...userWithoutPassword } = userData;
-
-    logger.success(`New user registered: ${email} as ${userRole}`);
+    logger.success(`User registered: ${firebaseEmail || firebasePhone} (${userRole})`);
 
     return res.status(201).json({
       status: "success",
-      message: "User registered successfully",
+      message: "Registration successful",
       data: {
-        user: userWithoutPassword,
-        token: token,
+        user: {
+          userId: uid,
+          email: firebaseEmail,
+          phone: phone || firebasePhone,
+          name: name.trim(),
+          role: userRole,
+        },
       },
     });
   } catch (error) {
-    logger.error("Registration error:", error.message);
+    logger.error("Register error:", error.message);
+
+    if (error.code === "auth/id-token-expired" || error.code === "auth/argument-error") {
+      return res.status(401).json({
+        status: "error",
+        message: "Invalid or expired token.",
+      });
+    }
+
     return res.status(500).json({
       status: "error",
-      message: "Registration failed. Please try again.",
+      message: "Registration failed",
       error: process.env.NODE_ENV === "development" ? error.message : undefined,
     });
   }
 };
 
 // ============================================
-// LOGIN USER
+// SYNC LOGIN (Update lastLogin timestamp)
 // POST /api/auth/login
+// Called after Firebase Auth sign-in on frontend
+// Header: Authorization: Bearer <Firebase ID Token>
 // ============================================
 const login = async (req, res) => {
   try {
-    const { email, password } = req.body;
-
-    // --- VALIDATION ---
-    if (!email || !password) {
-      return res.status(400).json({
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({
         status: "error",
-        message: "Email and password are required",
+        message: "Firebase ID token required.",
       });
     }
 
-    // --- FIND USER BY EMAIL ---
-    const userSnapshot = await db
+    const idToken = authHeader.split(" ")[1];
+    const decodedToken = await admin.auth().verifyIdToken(idToken);
+    const uid = decodedToken.uid;
+
+    // Get user profile
+    const userDoc = await db
       .collection(CONSTANTS.COLLECTIONS.USERS)
-      .where("email", "==", email.toLowerCase().trim())
-      .limit(1)
+      .doc(uid)
       .get();
 
-    if (userSnapshot.empty) {
-      return res.status(401).json({
+    if (!userDoc.exists) {
+      return res.status(404).json({
         status: "error",
-        message: "Invalid email or password",
+        message: "User profile not found. Please register first.",
       });
     }
 
-    const userDoc = userSnapshot.docs[0];
     const userData = userDoc.data();
 
-    // --- VERIFY PASSWORD ---
-    const isPasswordValid = await bcrypt.compare(password, userData.password);
+    // Update last login
+    await db.collection(CONSTANTS.COLLECTIONS.USERS).doc(uid).update({
+      lastLogin: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
 
-    if (!isPasswordValid) {
-      return res.status(401).json({
-        status: "error",
-        message: "Invalid email or password",
-      });
-    }
-
-    // --- GENERATE TOKEN ---
-    const token = generateToken(userData.userId, userData.email, userData.role);
-
-    // --- UPDATE LAST LOGIN ---
-    await db
-      .collection(CONSTANTS.COLLECTIONS.USERS)
-      .doc(userData.userId)
-      .update({
-        lastLoginAt: admin.firestore.FieldValue.serverTimestamp(),
-      });
-
-    // --- RESPONSE ---
-    const { password: _, ...userWithoutPassword } = userData;
-
-    logger.success(`User logged in: ${email}`);
+    logger.info(`User logged in: ${userData.email || userData.phone}`);
 
     return res.status(200).json({
       status: "success",
       message: "Login successful",
       data: {
-        user: userWithoutPassword,
-        token: token,
+        user: {
+          userId: uid,
+          email: userData.email,
+          phone: userData.phone,
+          name: userData.name,
+          role: userData.role,
+        },
       },
     });
   } catch (error) {
     logger.error("Login error:", error.message);
     return res.status(500).json({
       status: "error",
-      message: "Login failed. Please try again.",
+      message: "Login failed",
       error: process.env.NODE_ENV === "development" ? error.message : undefined,
     });
   }
 };
 
 // ============================================
-// GET CURRENT USER PROFILE
+// GET PROFILE
 // GET /api/auth/me
-// Requires: verifyToken middleware
+// Protected: requires Firebase token
 // ============================================
 const getProfile = async (req, res) => {
   try {
-    // req.user is set by verifyToken middleware
-    const userDoc = await db
-      .collection(CONSTANTS.COLLECTIONS.USERS)
-      .doc(req.user.userId)
-      .get();
-
-    if (!userDoc.exists) {
-      return res.status(404).json({
-        status: "error",
-        message: "User not found",
-      });
-    }
-
-    const userData = userDoc.data();
-    const { password: _, ...userWithoutPassword } = userData;
-
     return res.status(200).json({
       status: "success",
       data: {
-        user: userWithoutPassword,
+        user: {
+          userId: req.user.userId,
+          email: req.user.email,
+          phone: req.user.phone,
+          name: req.user.name,
+          role: req.user.role,
+          createdAt: req.user.createdAt,
+          lastLogin: req.user.lastLogin,
+        },
       },
     });
   } catch (error) {
     logger.error("Get profile error:", error.message);
     return res.status(500).json({
       status: "error",
-      message: "Failed to fetch profile",
+      message: "Failed to get profile",
     });
   }
 };
 
 // ============================================
-// UPDATE USER PROFILE
+// UPDATE PROFILE
 // PUT /api/auth/profile
-// Requires: verifyToken middleware
+// Protected: requires Firebase token
+// Body: { name, phone }
 // ============================================
 const updateProfile = async (req, res) => {
   try {
     const { name, phone } = req.body;
-    const updateData = {};
 
-    if (name) updateData.name = name.trim();
-    if (phone) updateData.phone = phone.trim();
+    const updates = {
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
 
-    if (Object.keys(updateData).length === 0) {
-      return res.status(400).json({
-        status: "error",
-        message: "Nothing to update. Send name or phone.",
-      });
-    }
-
-    updateData.updatedAt = admin.firestore.FieldValue.serverTimestamp();
+    if (name && name.trim().length >= 2) updates.name = name.trim();
+    if (phone) updates.phone = phone;
 
     await db
       .collection(CONSTANTS.COLLECTIONS.USERS)
       .doc(req.user.userId)
-      .update(updateData);
+      .update(updates);
 
-    logger.success(`Profile updated for: ${req.user.email}`);
+    logger.info(`Profile updated: ${req.user.email}`);
 
     return res.status(200).json({
       status: "success",
       message: "Profile updated successfully",
-      data: updateData,
+      data: {
+        user: {
+          userId: req.user.userId,
+          email: req.user.email,
+          name: updates.name || req.user.name,
+          phone: updates.phone || req.user.phone,
+          role: req.user.role,
+        },
+      },
     });
   } catch (error) {
     logger.error("Update profile error:", error.message);
@@ -277,21 +254,27 @@ const updateProfile = async (req, res) => {
 };
 
 // ============================================
-// GET ALL USERS (ADMIN ONLY)
+// GET ALL USERS (Admin only)
 // GET /api/auth/users
 // ============================================
 const getAllUsers = async (req, res) => {
   try {
-    const usersSnapshot = await db
+    const snapshot = await db
       .collection(CONSTANTS.COLLECTIONS.USERS)
-      .orderBy("createdAt", "desc")
       .get();
 
     const users = [];
-    usersSnapshot.forEach((doc) => {
-      const userData = doc.data();
-      const { password: _, ...userWithoutPassword } = userData;
-      users.push(userWithoutPassword);
+    snapshot.forEach((doc) => {
+      const data = doc.data();
+      users.push({
+        userId: doc.id,
+        email: data.email,
+        phone: data.phone,
+        name: data.name,
+        role: data.role,
+        createdAt: data.createdAt,
+        lastLogin: data.lastLogin,
+      });
     });
 
     return res.status(200).json({

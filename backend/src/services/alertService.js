@@ -90,8 +90,8 @@ const checkWeightAlert = async (tripId, deviceId, baseWeight, currentWeight, loc
         weightDiff > 5
           ? CONSTANTS.ALERT_SEVERITY.CRITICAL
           : weightDiff > 2
-          ? CONSTANTS.ALERT_SEVERITY.HIGH
-          : CONSTANTS.ALERT_SEVERITY.MEDIUM,
+            ? CONSTANTS.ALERT_SEVERITY.HIGH
+            : CONSTANTS.ALERT_SEVERITY.MEDIUM,
       message: `Weight decreased by ${weightDiff.toFixed(2)} kg (Base: ${baseWeight} kg, Current: ${currentWeight} kg)`,
       details: {
         baseWeight: baseWeight,
@@ -267,13 +267,15 @@ const getAllActiveAlerts = async () => {
     const snapshot = await db
       .collection(CONSTANTS.COLLECTIONS.ALERTS)
       .where("resolved", "==", false)
-      .orderBy("timestampMs", "desc")
       .get();
 
     const alerts = [];
     snapshot.forEach((doc) => {
       alerts.push(doc.data());
     });
+
+    // Sort by timestampMs descending (in-memory to avoid composite index)
+    alerts.sort((a, b) => (b.timestampMs || 0) - (a.timestampMs || 0));
 
     return alerts;
   } catch (error) {
@@ -293,3 +295,4 @@ module.exports = {
   resolveAlert,
   getAllActiveAlerts,
 };
+

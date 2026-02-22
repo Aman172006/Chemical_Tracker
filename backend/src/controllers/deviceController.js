@@ -1,8 +1,16 @@
+const {
+  broadcastTrackingUpdate,
+  broadcastAlert,
+  broadcastNewSecretId,
+  broadcastDeviceStatus,
+} = require("../websocket/socketHandler");
+
+
 const { db, admin, rtdb } = require("../config/firebase");
 const CONSTANTS = require("../config/constants");
 const logger = require("../utils/logger");
 const { createNewSecretId } = require("../services/idGeneratorService");
-const { shouldGenerateNewId, checkDeviation, getTripProgress } = require("../services/geofenceService");
+const { shouldGenerateNewId, checkDeviation, checkCheckpoints, getTripProgress } = require("../services/geofenceService");
 const {
   checkWeightAlert,
   checkSealAlert,
@@ -147,6 +155,45 @@ const receiveDeviceData = async (req, res) => {
     }
 
     // ============================================
+    // 6. CHECKPOINT CROSSING CHECK
+    // ============================================
+    let checkpointUpdate = {};
+    if (tripData.checkpoints && tripData.checkpoints.length > 0) {
+      const cpResult = checkCheckpoints(
+        currentLocation,
+        tripData.checkpoints,
+        tripData.checkpointsCrossed || []
+      );
+      if (cpResult.newlyCrossed.length > 0) {
+        checkpointUpdate = {
+          checkpointsCrossed: cpResult.allCrossed,
+          checkpointsPending: (tripData.checkpoints || []).filter(c => !cpResult.allCrossed.includes(c.order)).map(c => c.order),
+        };
+        logger.info(`Checkpoints crossed on trip ${tripId}: ${cpResult.newlyCrossed.map(c => c.label).join(', ')}`);
+      }
+    }
+
+    // ============================================
+    // 7. PERMANENT DEVIATION LOGGING (Security)
+    // If deviated, set compromised=true PERMANENTLY
+    // ============================================
+    let deviationUpdate = {};
+    if (tripData.plannedRoute && tripData.plannedRoute.length > 0) {
+      const devResult = checkDeviation(currentLocation, tripData.plannedRoute);
+      if (devResult.isDeviated) {
+        deviationUpdate = {
+          compromised: true,
+          deviationHistory: admin.firestore.FieldValue.arrayUnion({
+            timestamp: new Date().toISOString(),
+            location: currentLocation,
+            deviationDistance: devResult.deviationDistance,
+          }),
+        };
+        logger.warn(`DEVIATION on trip ${tripId}: ${devResult.deviationDistance}m off-route — trip COMPROMISED`);
+      }
+    }
+
+    // ============================================
     // CHECK SECRET ID GENERATION
     // ============================================
     let newSecretId = null;
@@ -221,6 +268,8 @@ const receiveDeviceData = async (req, res) => {
       currentWeight: currentWeight,
       distanceCovered: Math.round(totalDistanceCovered),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      ...checkpointUpdate,
+      ...deviationUpdate,
     };
 
     // Set base weight on first reading
@@ -279,6 +328,41 @@ const receiveDeviceData = async (req, res) => {
               : CONSTANTS.CONTAINER_STATUS.IN_TRANSIT,
         });
     }
+
+    // ============================================
+    // BROADCAST VIA SOCKET.IO (Real-time to Frontend)
+    // ============================================
+
+    // 1. Broadcast tracking update to all clients watching this trip
+    broadcastTrackingUpdate(tripId, {
+      location: currentLocation,
+      weight: currentWeight,
+      sealStatus: currentSealStatus,
+      deviceAttached: isDeviceAttached,
+      batteryLevel: currentBattery,
+      progress: progress,
+      distanceCovered: Math.round(totalDistanceCovered),
+    });
+
+    // 2. Broadcast each alert
+    if (alerts.length > 0) {
+      for (const alert of alerts) {
+        broadcastAlert(tripId, tripData.ownerId, alert);
+      }
+    }
+
+    // 3. Broadcast new secret ID (only to owner)
+    if (newSecretId) {
+      broadcastNewSecretId(tripId, tripData.ownerId, {
+        secretId: newSecretId,
+        generatedAt: Date.now(),
+        location: currentLocation,
+      });
+    }
+
+    // 4. Broadcast device status
+    broadcastDeviceStatus(tripId, isDeviceAttached);
+
 
     // ============================================
     // BUILD RESPONSE FOR ESP32
@@ -530,8 +614,6 @@ const getTrackingHistory = async (req, res) => {
     const snapshot = await db
       .collection(CONSTANTS.COLLECTIONS.TRACKING_DATA)
       .where("tripId", "==", tripId)
-      .orderBy("timestampMs", "desc")
-      .limit(limit)
       .get();
 
     const trackingData = [];
@@ -539,12 +621,18 @@ const getTrackingHistory = async (req, res) => {
       trackingData.push(doc.data());
     });
 
+    // Sort by timestampMs descending (in-memory to avoid composite index)
+    trackingData.sort((a, b) => (b.timestampMs || 0) - (a.timestampMs || 0));
+
+    // Apply limit after sorting
+    const limited = trackingData.slice(0, limit);
+
     return res.status(200).json({
       status: "success",
       data: {
         tripId: tripId,
-        count: trackingData.length,
-        tracking: trackingData,
+        count: limited.length,
+        tracking: limited,
       },
     });
   } catch (error) {

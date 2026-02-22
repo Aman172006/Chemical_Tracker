@@ -1,10 +1,7 @@
 const express = require("express");
 const router = express.Router();
 
-// Import controller
 const authController = require("../controllers/authController");
-
-// Import middleware
 const {
   verifyToken,
   adminOnly,
@@ -12,46 +9,32 @@ const {
 } = require("../middleware/authMiddleware");
 
 // ============================================
-// PUBLIC ROUTES (No auth needed)
+// AUTH ROUTES (Firebase Auth)
+// Frontend handles sign-in/sign-up via Firebase SDK
+// Backend syncs user profile to Firestore
 // ============================================
 
-// Register new user
+// Sync user after Firebase sign-up (creates Firestore profile)
 // POST /api/auth/register
-// Body: { email, password, name, phone, role }
+// Header: Authorization: Bearer <Firebase ID Token>
+// Body: { name, phone, role }
 router.post("/register", authController.register);
 
-// Login user
+// Sync user after Firebase sign-in (updates lastLogin)
 // POST /api/auth/login
-// Body: { email, password }
+// Header: Authorization: Bearer <Firebase ID Token>
 router.post("/login", authController.login);
-
-// ============================================
-// PROTECTED ROUTES (Auth required)
-// ============================================
 
 // Get current user profile
 // GET /api/auth/me
-// Header: Authorization: Bearer <token>
 router.get("/me", verifyToken, anyAuthenticated, authController.getProfile);
 
 // Update profile
 // PUT /api/auth/profile
-// Header: Authorization: Bearer <token>
-// Body: { name, phone }
-router.put(
-  "/profile",
-  verifyToken,
-  anyAuthenticated,
-  authController.updateProfile
-);
-
-// ============================================
-// ADMIN ROUTES
-// ============================================
+router.put("/profile", verifyToken, anyAuthenticated, authController.updateProfile);
 
 // Get all users (admin only)
 // GET /api/auth/users
-// Header: Authorization: Bearer <token>
 router.get("/users", verifyToken, adminOnly, authController.getAllUsers);
 
 module.exports = router;

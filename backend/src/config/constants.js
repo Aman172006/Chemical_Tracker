@@ -60,6 +60,8 @@ const CONSTANTS = {
     SECRET_ID_DISTANCE_M: parseFloat(process.env.SECRET_ID_DISTANCE_THRESHOLD) || 150,
     LOW_BATTERY_PERCENT: 20,
     DATA_STALE_SECONDS: 60,
+    CHECKPOINT_PROXIMITY_M: parseFloat(process.env.CHECKPOINT_PROXIMITY_M) || 200,
+    GPS_MATCH_TOLERANCE_M: parseFloat(process.env.GPS_MATCH_TOLERANCE_M) || 50,
   },
 
   // Firestore Collection Names
@@ -76,6 +78,7 @@ const CONSTANTS = {
   RTDB_PATHS: {
     LIVE: "live",
     ACTIVE_ALERTS: "active_alerts",
+    TELEMETRY: "telemetry",
   },
 
   // Device Data Interval

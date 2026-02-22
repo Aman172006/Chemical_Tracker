@@ -78,4 +78,13 @@ router.get(
   tripController.getSecretIds
 );
 
+// Reroute trip (owner redefines path when road blocked)
+// PUT /api/trip/:tripId/reroute
+router.put(
+  "/:tripId/reroute",
+  verifyToken,
+  ownerOnly,
+  tripController.rerouteTrip
+);
+
 module.exports = router;
